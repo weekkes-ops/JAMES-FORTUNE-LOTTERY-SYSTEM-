@@ -1,0 +1,6 @@
+{
+  "name": "JAMES FORTUNE LOTTERY SYSTEM",
+  "description": "Extract, manage, analyze, and export James Fortune Lottery results to Excel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
