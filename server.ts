@@ -128,6 +128,86 @@ async function startServer() {
     }
   });
 
+  // Lotto results prediction API
+  app.post("/api/predict", async (req, res) => {
+    try {
+      const { gameName, history } = req.body;
+      if (!gameName) {
+        return res.status(400).json({ error: "Game name is required" });
+      }
+
+      const client = getGeminiClient();
+
+      // We will provide a neat prompt that passes the history of recent draws for this game,
+      // and asks Gemini to output exactly 5 predicted numbers (between 1 and 90), 2 extra numbers,
+      // and a detailed reason/rationale.
+      const prompt = `
+        You are an expert lottery analyst for the JAMES FORTUNE LOTTERY SYSTEM.
+        Analyze the historical draw results for the game "${gameName}" provided below:
+        ${JSON.stringify(history, null, 2)}
+
+        Based on these historical results, predict the outcomes of the next game (next edition).
+        Return:
+        1. A list of exactly 5 predicted winning numbers (each between 1 and 90, unique, sorted).
+        2. A list of exactly 2 predicted extra numbers (each between 1 and 90, unique, sorted).
+        3. A list of exactly 5 predicted machine numbers (each between 1 and 90, unique, sorted).
+        4. A comprehensive reasoning and analysis (e.g. Hot/Cold numbers, gap analysis, parity pattern, or recent frequency trends) explaining why these numbers were selected.
+
+        Make sure your analysis is grounded in the actual history provided (e.g. "Number 79 appeared 3 times recently").
+      `;
+
+      const response = await client.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              predictedWinningNumbers: {
+                type: Type.ARRAY,
+                items: { type: Type.INTEGER },
+                description: "List of exactly 5 predicted winning numbers",
+              },
+              predictedExtraNumbers: {
+                type: Type.ARRAY,
+                items: { type: Type.INTEGER },
+                description: "List of exactly 2 predicted extra numbers",
+              },
+              predictedMachineNumbers: {
+                type: Type.ARRAY,
+                items: { type: Type.INTEGER },
+                description: "List of exactly 5 predicted machine numbers",
+              },
+              reasoning: {
+                type: Type.STRING,
+                description: "Detailed step-by-step statistical reasoning and analysis based on hot/cold frequencies, spacing, parity, etc.",
+              },
+              nextEdition: {
+                type: Type.STRING,
+                description: "Predicted next edition number (usually current edition + 1)",
+              }
+            },
+            required: ["predictedWinningNumbers", "predictedExtraNumbers", "predictedMachineNumbers", "reasoning"],
+          },
+        },
+      });
+
+      const jsonStr = response.text;
+      if (!jsonStr) {
+        return res.status(500).json({ error: "Empty response received from Gemini" });
+      }
+
+      const predictionData = JSON.parse(jsonStr.trim());
+      return res.json({ success: true, data: predictionData });
+    } catch (error: any) {
+      console.error("Gemini Prediction error:", error);
+      return res.status(500).json({
+        error: error.message || "An unexpected error occurred during prediction generation.",
+      });
+    }
+  });
+
   // Vite development server / production asset serving
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

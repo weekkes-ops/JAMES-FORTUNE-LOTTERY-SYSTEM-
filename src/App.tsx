@@ -5,8 +5,18 @@ import StatsDashboard from "./components/StatsDashboard";
 import ResultsTable from "./components/ResultsTable";
 import LottoExtractor from "./components/LottoExtractor";
 import VisualSlipCard from "./components/VisualSlipCard";
+import PredictionHub from "./components/PredictionHub";
 import { HelpCircle, ChevronLeft, ChevronRight, SlidersHorizontal, Layers, RotateCcw } from "lucide-react";
 import { normalizeDateToYMD } from "./utils/dateUtils";
+import { collection, onSnapshot } from "firebase/firestore";
+import { db } from "./firebase";
+import {
+  addLottoResultToFirestore,
+  deleteLottoResultFromFirestore,
+  updateLottoResultInFirestore,
+  saveBulkLottoResultsToFirestore,
+  resetLottoResultsInFirestore
+} from "./services/lottoService";
 
 // Helper to repair corrupted results (e.g. restore original preloaded numbers or assign distinct ones for custom entries)
 function repairLottoResults(currentResults: LottoResult[]): LottoResult[] {
@@ -79,34 +89,10 @@ function repairLottoResults(currentResults: LottoResult[]): LottoResult[] {
 }
 
 export default function App() {
-  const [results, setResults] = useState<LottoResult[]>(() => {
-    let initialResults = PRELOADED_LOTTO_RESULTS;
-    const saved = localStorage.getItem("mercury_lotto_results_v1");
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved) as LottoResult[];
-        const normalizedParsed = parsed.map(item => ({
-          ...item,
-          date: normalizeDateToYMD(item.date)
-        }));
-        // Automatically inject any newly preloaded bulletin results if they are not in the saved state
-        const missing = PRELOADED_LOTTO_RESULTS.filter(
-          (pre) => !normalizedParsed.some((p) => p.id === pre.id)
-        );
-        if (missing.length > 0) {
-          initialResults = [...normalizedParsed, ...missing];
-        } else {
-          initialResults = normalizedParsed;
-        }
-      } catch (err) {
-        console.error("Failed to parse saved results:", err);
-        initialResults = PRELOADED_LOTTO_RESULTS;
-      }
-    }
-    return repairLottoResults(initialResults);
-  });
-
+  const [results, setResults] = useState<LottoResult[]>(() => repairLottoResults(PRELOADED_LOTTO_RESULTS));
+  const [loading, setLoading] = useState(true);
   const [selectedSlipId, setSelectedSlipId] = useState<string | null>("lotto-1");
+  const [latestInsertedDraw, setLatestInsertedDraw] = useState<LottoResult | null>(null);
 
   // Custom modal/alert dialog states
   const [confirmState, setConfirmState] = useState<{
@@ -140,10 +126,49 @@ export default function App() {
     }
   }, [toastState]);
 
-  // Sync results to localStorage whenever they change
+  // Sync results with Firestore in real-time
   useEffect(() => {
-    localStorage.setItem("mercury_lotto_results_v1", JSON.stringify(results));
-  }, [results]);
+    const colRef = collection(db, "lotto_results");
+    
+    const unsubscribe = onSnapshot(colRef, async (snapshot) => {
+      if (snapshot.empty) {
+        console.log("Firestore collection is empty. Seeding with preloaded results...");
+        try {
+          await saveBulkLottoResultsToFirestore(PRELOADED_LOTTO_RESULTS);
+        } catch (error) {
+          console.error("Failed to seed Firestore database:", error);
+          setLoading(false);
+        }
+      } else {
+        const fetchedResults: LottoResult[] = [];
+        snapshot.forEach((doc) => {
+          fetchedResults.push(doc.data() as LottoResult);
+        });
+
+        const sorted = fetchedResults.sort((a, b) => {
+          const dateComp = b.date.localeCompare(a.date);
+          if (dateComp !== 0) return dateComp;
+
+          const edA = parseInt(a.edition) || 0;
+          const edB = parseInt(b.edition) || 0;
+          if (edB !== edA) return edB - edA;
+
+          return b.id.localeCompare(a.id);
+        });
+
+        const repaired = repairLottoResults(sorted);
+        setResults(repaired);
+        setLoading(false);
+      }
+    }, (error) => {
+      console.error("Firestore onSnapshot error:", error);
+      // Fallback to preloaded results if Firestore fails
+      setResults(repairLottoResults(PRELOADED_LOTTO_RESULTS));
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   // Handle addition of a manually created or newly OCR-extracted result
   const handleAddResult = (newResult: LottoResult): boolean => {
@@ -163,9 +188,17 @@ export default function App() {
       return false;
     }
 
-    setResults((prev) => [normalizedNewResult, ...prev]);
-    setSelectedSlipId(normalizedNewResult.id); // Highlight the newly added item
-    showToast(`Added ${normalizedNewResult.gameName} draw successfully!`, "success");
+    addLottoResultToFirestore(normalizedNewResult)
+      .then(() => {
+        setSelectedSlipId(normalizedNewResult.id); // Highlight the newly added item
+        setLatestInsertedDraw(normalizedNewResult); // Trigger prediction recalculation and focus
+        showToast(`Added ${normalizedNewResult.gameName} draw successfully!`, "success");
+      })
+      .catch((err) => {
+        console.error("Error adding result to Firestore:", err);
+        showToast("Failed to save result to Firestore database.", "error");
+      });
+
     return true;
   };
 
@@ -188,10 +221,15 @@ export default function App() {
       return false;
     }
 
-    setResults((prev) =>
-      prev.map((r) => (r.id === normalizedUpdatedResult.id ? normalizedUpdatedResult : r))
-    );
-    showToast(`Successfully updated draw details for ${normalizedUpdatedResult.gameName}.`, "success");
+    updateLottoResultInFirestore(normalizedUpdatedResult)
+      .then(() => {
+        showToast(`Successfully updated draw details for ${normalizedUpdatedResult.gameName}.`, "success");
+      })
+      .catch((err) => {
+        console.error("Error updating result in Firestore:", err);
+        showToast("Failed to update result in Firestore database.", "error");
+      });
+
     return true;
   };
 
@@ -204,12 +242,18 @@ export default function App() {
       "Confirm Deletion",
       `Are you sure you want to delete the result for ${item.gameName} (Edition: ${item.edition}) on ${item.date}? This is irreversible.`,
       () => {
-        setResults((prev) => prev.filter((r) => r.id !== id));
-        if (selectedSlipId === id) {
-          const remaining = results.filter((r) => r.id !== id);
-          setSelectedSlipId(remaining[0]?.id || null);
-        }
-        showToast("Lotto result successfully deleted from ledger.", "info");
+        deleteLottoResultFromFirestore(id)
+          .then(() => {
+            if (selectedSlipId === id) {
+              const remaining = results.filter((r) => r.id !== id);
+              setSelectedSlipId(remaining[0]?.id || null);
+            }
+            showToast("Lotto result successfully deleted from ledger.", "info");
+          })
+          .catch((err) => {
+            console.error("Error deleting result from Firestore:", err);
+            showToast("Failed to delete result from Firestore database.", "error");
+          });
       }
     );
   };
@@ -221,9 +265,15 @@ export default function App() {
       "Are you sure you want to reset the ledger? This will restore the preloaded bulletin entries and delete all custom entries, manual edits, or imported Excel sheets.",
       () => {
         const restored = JSON.parse(JSON.stringify(PRELOADED_LOTTO_RESULTS)) as LottoResult[];
-        setResults(restored);
-        setSelectedSlipId("lotto-1");
-        showToast("Ledger data successfully reset to the preloaded drawings.", "success");
+        resetLottoResultsInFirestore(restored)
+          .then(() => {
+            setSelectedSlipId("lotto-1");
+            showToast("Ledger data successfully reset to the preloaded drawings.", "success");
+          })
+          .catch((err) => {
+            console.error("Error resetting results in Firestore:", err);
+            showToast("Failed to reset results in Firestore database.", "error");
+          });
       }
     );
   };
@@ -231,7 +281,6 @@ export default function App() {
   // Handle bulk import of results
   const handleBulkImport = (importedResults: LottoResult[], overwrite: boolean) => {
     if (overwrite) {
-      // Overwrite: just filter out duplicates within the imported list itself
       const uniqueImported: LottoResult[] = [];
       const seen = new Set<string>();
       for (const r of importedResults) {
@@ -241,17 +290,21 @@ export default function App() {
           uniqueImported.push(r);
         }
       }
-      setResults(uniqueImported);
-      if (uniqueImported.length > 0) {
-        setSelectedSlipId(uniqueImported[0].id);
-      }
-      showToast(`Ledger overwritten successfully with ${uniqueImported.length} unique imported results.`, "success");
+      resetLottoResultsInFirestore(uniqueImported)
+        .then(() => {
+          if (uniqueImported.length > 0) {
+            setSelectedSlipId(uniqueImported[0].id);
+          }
+          showToast(`Ledger overwritten successfully with ${uniqueImported.length} unique imported results.`, "success");
+        })
+        .catch((err) => {
+          console.error("Error importing bulk results to Firestore:", err);
+          showToast("Failed to overwrite ledger in Firestore.", "error");
+        });
     } else {
-      // Append: filter out duplicates within the imported list itself, and compared to existing results
       const uniqueImported: LottoResult[] = [];
       const seen = new Set<string>();
-      
-      // Seed with existing entries
+
       for (const r of results) {
         const key = `${r.gameName.trim().toLowerCase()}|${r.date.trim()}|${r.time.trim().toLowerCase()}`;
         seen.add(key);
@@ -273,14 +326,19 @@ export default function App() {
         return;
       }
 
-      setResults((prev) => [...uniqueImported, ...prev]);
-      setSelectedSlipId(uniqueImported[0].id);
-      
-      if (skipCount > 0) {
-        showToast(`Successfully imported ${uniqueImported.length} new entries. Skipped ${skipCount} duplicate entries.`, "success");
-      } else {
-        showToast(`Successfully imported all ${uniqueImported.length} entries.`, "success");
-      }
+      saveBulkLottoResultsToFirestore(uniqueImported)
+        .then(() => {
+          setSelectedSlipId(uniqueImported[0].id);
+          if (skipCount > 0) {
+            showToast(`Successfully imported ${uniqueImported.length} new entries. Skipped ${skipCount} duplicate entries.`, "success");
+          } else {
+            showToast(`Successfully imported all ${uniqueImported.length} entries.`, "success");
+          }
+        })
+        .catch((err) => {
+          console.error("Error appending bulk results to Firestore:", err);
+          showToast("Failed to append imported results to Firestore.", "error");
+        });
     }
   };
 
@@ -288,13 +346,14 @@ export default function App() {
   const handleDeleteDuplicates = () => {
     const seen = new Set<string>();
     const uniqueResults: LottoResult[] = [];
+    const duplicateIdsToDelete: string[] = [];
     let duplicatesCount = 0;
 
-    // Process all results to filter out entries that share the exact same game, date, and time
     for (const r of results) {
       const key = `${r.gameName.trim().toLowerCase()}|${r.date.trim()}|${r.time.trim().toLowerCase()}`;
       if (seen.has(key)) {
         duplicatesCount++;
+        duplicateIdsToDelete.push(r.id);
       } else {
         seen.add(key);
         uniqueResults.push(r);
@@ -310,17 +369,36 @@ export default function App() {
       "Remove Duplicate Draws",
       `Found ${duplicatesCount} duplicate draw entry/entries with identical Game Name, Date, and Time. Would you like to delete them and keep only one unique entry per draw time?`,
       () => {
-        setResults(uniqueResults);
-        if (selectedSlipId && !uniqueResults.some((r) => r.id === selectedSlipId)) {
-          setSelectedSlipId(uniqueResults[0]?.id || null);
-        }
-        showToast(`Successfully deleted ${duplicatesCount} duplicate draw entries from the ledger.`, "success");
+        const deletePromises = duplicateIdsToDelete.map(id => deleteLottoResultFromFirestore(id));
+        Promise.all(deletePromises)
+          .then(() => {
+            if (selectedSlipId && !uniqueResults.some((r) => r.id === selectedSlipId)) {
+              setSelectedSlipId(uniqueResults[0]?.id || null);
+            }
+            showToast(`Successfully deleted ${duplicatesCount} duplicate draw entries from the ledger.`, "success");
+          })
+          .catch((err) => {
+            console.error("Error deleting duplicates from Firestore:", err);
+            showToast("Failed to delete duplicate entries from Firestore.", "error");
+          });
       }
     );
   };
 
   // Get currently selected visual slip
   const activeSlip = results.find((r) => r.id === selectedSlipId) || results[0];
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+        <div className="w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-black text-lg tracking-tighter animate-bounce shadow-md">
+          JF
+        </div>
+        <h2 className="text-sm font-bold text-slate-800 mt-4">James Fortune Lottery System</h2>
+        <p className="text-xs text-slate-500 mt-1 animate-pulse">Loading secure cloud database...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-16" id="lotto-app-root">
@@ -341,7 +419,7 @@ export default function App() {
           <div className="flex items-center gap-4 text-xs font-semibold text-slate-500">
             <span className="flex items-center gap-1 bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full border border-emerald-100 font-bold">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              10/10 Bulletins Extracted
+              {results.length} Bulletins Extracted
             </span>
             <button
               onClick={handleResetResults}
@@ -445,13 +523,20 @@ export default function App() {
 
           {/* Right Block: Live OCR Extractor (4 Cols) */}
           <div className="lg:col-span-4 flex">
-            <LottoExtractor onExtractionComplete={handleAddResult} />
+            <LottoExtractor results={results} onExtractionComplete={handleAddResult} />
           </div>
 
         </div>
 
         {/* Section: Live Analytics Stats */}
         <StatsDashboard results={results} />
+
+        {/* Section: Next Game Prediction Hub */}
+        <PredictionHub 
+          results={results} 
+          latestInsertedDraw={latestInsertedDraw} 
+          onClearLatestDraw={() => setLatestInsertedDraw(null)} 
+        />
 
         {/* Section: Interactive Ledger */}
         <ResultsTable

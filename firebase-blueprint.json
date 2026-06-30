@@ -1,0 +1,55 @@
+{
+  "entities": {
+    "LottoResult": {
+      "title": "LottoResult",
+      "description": "Represents an individual lottery drawing result, parsed from an image or input manually.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the lottery drawing result"
+        },
+        "gameName": {
+          "type": "string",
+          "description": "Name of the lottery game (e.g., MAD MAX, MANO)"
+        },
+        "date": {
+          "type": "string",
+          "format": "date",
+          "description": "Draw date in YYYY-MM-DD format"
+        },
+        "time": {
+          "type": "string",
+          "description": "Draw time (e.g. 11AM, 2PM, 4PM)"
+        },
+        "edition": {
+          "type": "string",
+          "description": "The edition or draw number"
+        },
+        "winningNumbers": {
+          "type": "array",
+          "description": "List of exactly 5 winning numbers"
+        },
+        "extraNumbers": {
+          "type": "array",
+          "description": "List of extra/bonus numbers, if any"
+        },
+        "machineNumbers": {
+          "type": "array",
+          "description": "List of machine numbers, if any"
+        },
+        "sourceImageIndex": {
+          "type": "integer",
+          "description": "Index of the source image in preloaded results"
+        }
+      },
+      "required": ["id", "gameName", "date", "time", "winningNumbers"]
+    }
+  },
+  "firestore": {
+    "/lotto_results/{id}": {
+      "schema": "LottoResult",
+      "description": "Collection of all lottery draw results, both preloaded and user-added/extracted"
+    }
+  }
+}
