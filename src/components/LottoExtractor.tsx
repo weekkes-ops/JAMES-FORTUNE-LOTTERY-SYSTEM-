@@ -77,6 +77,18 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
       return;
     }
 
+    // Enforce a maximum batch size limit of 15 files
+    if (validFiles.length > 15) {
+      setGlobalError(`Batch size limit exceeded. You attempted to upload ${validFiles.length} images. Please upload a maximum of 15 images per batch to ensure reliable parsing and optimal browser performance.`);
+      return;
+    }
+
+    // Enforce a maximum overall queue limit of 30 files
+    if (queue.length + validFiles.length > 30) {
+      setGlobalError(`Queue capacity limit reached. Adding these files would exceed the maximum queue size of 30 drawings. Please process, save, or clear items currently in your queue first.`);
+      return;
+    }
+
     setGlobalError(null);
 
     const loadPromises = validFiles.map((file) => {
