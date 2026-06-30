@@ -9,7 +9,7 @@ import PredictionHub from "./components/PredictionHub";
 import { HelpCircle, ChevronLeft, ChevronRight, SlidersHorizontal, Layers, RotateCcw } from "lucide-react";
 import { normalizeDateToYMD } from "./utils/dateUtils";
 import { collection, onSnapshot } from "firebase/firestore";
-import { db } from "./firebase";
+import { db, handleFirestoreError, OperationType } from "./firebase";
 import {
   addLottoResultToFirestore,
   deleteLottoResultFromFirestore,
@@ -165,6 +165,7 @@ export default function App() {
       // Fallback to preloaded results if Firestore fails
       setResults(repairLottoResults(PRELOADED_LOTTO_RESULTS));
       setLoading(false);
+      handleFirestoreError(error, OperationType.LIST, "lotto_results");
     });
 
     return () => unsubscribe();

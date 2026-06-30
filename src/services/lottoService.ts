@@ -1,5 +1,5 @@
 import { collection, doc, setDoc, deleteDoc, writeBatch, getDocs } from "firebase/firestore";
-import { db } from "../firebase";
+import { db, handleFirestoreError, OperationType } from "../firebase";
 import { LottoResult } from "../types";
 
 const COLLECTION_NAME = "lotto_results";
@@ -9,7 +9,11 @@ const COLLECTION_NAME = "lotto_results";
  */
 export async function addLottoResultToFirestore(result: LottoResult): Promise<void> {
   const docRef = doc(db, COLLECTION_NAME, result.id);
-  await setDoc(docRef, result);
+  try {
+    await setDoc(docRef, result);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${result.id}`);
+  }
 }
 
 /**
@@ -17,7 +21,11 @@ export async function addLottoResultToFirestore(result: LottoResult): Promise<vo
  */
 export async function deleteLottoResultFromFirestore(id: string): Promise<void> {
   const docRef = doc(db, COLLECTION_NAME, id);
-  await deleteDoc(docRef);
+  try {
+    await deleteDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `${COLLECTION_NAME}/${id}`);
+  }
 }
 
 /**
@@ -25,7 +33,11 @@ export async function deleteLottoResultFromFirestore(id: string): Promise<void> 
  */
 export async function updateLottoResultInFirestore(result: LottoResult): Promise<void> {
   const docRef = doc(db, COLLECTION_NAME, result.id);
-  await setDoc(docRef, result);
+  try {
+    await setDoc(docRef, result);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${result.id}`);
+  }
 }
 
 /**
@@ -41,7 +53,11 @@ export async function saveBulkLottoResultsToFirestore(results: LottoResult[]): P
       const docRef = doc(db, COLLECTION_NAME, r.id);
       batch.set(docRef, r);
     }
-    await batch.commit();
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, COLLECTION_NAME);
+    }
   }
 }
 
@@ -51,7 +67,12 @@ export async function saveBulkLottoResultsToFirestore(results: LottoResult[]): P
  */
 export async function resetLottoResultsInFirestore(preloaded: LottoResult[]): Promise<void> {
   const colRef = collection(db, COLLECTION_NAME);
-  const snapshot = await getDocs(colRef);
+  let snapshot;
+  try {
+    snapshot = await getDocs(colRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, COLLECTION_NAME);
+  }
   const docs = snapshot.docs;
 
   // 1. Delete all existing documents in chunks
@@ -62,9 +83,14 @@ export async function resetLottoResultsInFirestore(preloaded: LottoResult[]): Pr
     chunk.forEach((doc) => {
       batch.delete(doc.ref);
     });
-    await batch.commit();
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, COLLECTION_NAME);
+    }
   }
 
   // 2. Write the preloaded list in chunks
   await saveBulkLottoResultsToFirestore(preloaded);
 }
+
