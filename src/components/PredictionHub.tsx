@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { LottoResult } from "../types";
-import { getPredictionForGame, PredictionData, calculateLocalStatisticalPrediction } from "../utils/predictionEngine";
-import { Brain, Sparkles, Cpu, RotateCw, RefreshCw, BarChart4, TrendingUp, Info } from "lucide-react";
+import { getPredictionForGame, PredictionData, calculateLocalStatisticalPrediction, PredictionStrategy } from "../utils/predictionEngine";
+import { Brain, Sparkles, Cpu, RotateCw, RefreshCw, BarChart4, TrendingUp, Info, Hash, PlaySquare } from "lucide-react";
 
 interface PredictionHubProps {
   results: LottoResult[];
@@ -13,38 +13,74 @@ export default function PredictionHub({ results, latestInsertedDraw, onClearLate
   // Extract unique games dynamically from results list
   const games = Array.from(new Set(results.map((r) => r.gameName))).sort();
   const [selectedGame, setSelectedGame] = useState<string>(games[0] || "MAD MAX");
+  const [strategy, setStrategy] = useState<PredictionStrategy>("balanced");
+  const [targetEventName, setTargetEventName] = useState<string>("");
+  const [targetDate, setTargetDate] = useState<string>("");
+  const [targetTime, setTargetTime] = useState<string>("18:30");
   const [prediction, setPrediction] = useState<PredictionData | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
   // Load prediction when game selection changes or results list changes
-  const fetchPrediction = async (game: string) => {
+  const fetchPrediction = async (
+    game: string, 
+    currentStrategy: PredictionStrategy = strategy,
+    name = targetEventName,
+    date = targetDate,
+    time = targetTime
+  ) => {
     if (results.length === 0) return;
     setLoading(true);
     setError(null);
     try {
-      const pred = await getPredictionForGame(game, results);
+      const pred = await getPredictionForGame(game, results, currentStrategy, date, time, name);
       setPrediction(pred);
     } catch (err: any) {
       setError("Unable to compute prediction. Falling back to simple statistical calculations.");
-      const fallback = calculateLocalStatisticalPrediction(game, results);
+      const fallback = calculateLocalStatisticalPrediction(game, results, currentStrategy, date, time, name);
       setPrediction(fallback);
     } finally {
       setLoading(false);
     }
   };
 
+  // Auto-estimate next target date and standard draw times when selectedGame changes
   useEffect(() => {
     if (selectedGame) {
-      fetchPrediction(selectedGame);
+      setTargetEventName(selectedGame);
+      
+      const gameDraws = results.filter(
+        (r) => r.gameName.trim().toLowerCase() === selectedGame.trim().toLowerCase()
+      );
+      if (gameDraws.length > 0) {
+        const sorted = [...gameDraws].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        const latestDate = new Date(sorted[0].date);
+        if (!isNaN(latestDate.getTime())) {
+          // Default next game prediction to 1 day after the latest draw
+          latestDate.setDate(latestDate.getDate() + 1);
+          setTargetDate(latestDate.toISOString().split("T")[0]);
+        } else {
+          setTargetDate(new Date().toISOString().split("T")[0]);
+        }
+        setTargetTime(sorted[0].time || "18:30");
+      } else {
+        setTargetDate(new Date().toISOString().split("T")[0]);
+        setTargetTime("18:30");
+      }
     }
-  }, [selectedGame, results]);
+  }, [selectedGame]);
+
+  useEffect(() => {
+    if (selectedGame) {
+      fetchPrediction(selectedGame, strategy, targetEventName, targetDate, targetTime);
+    }
+  }, [selectedGame, results, strategy, targetEventName, targetDate, targetTime]);
 
   // Handle detection of a newly inserted draw to auto-focus and show predictions
   useEffect(() => {
     if (latestInsertedDraw) {
       setSelectedGame(latestInsertedDraw.gameName);
-      fetchPrediction(latestInsertedDraw.gameName);
+      fetchPrediction(latestInsertedDraw.gameName, strategy, latestInsertedDraw.gameName, targetDate, targetTime);
 
       // Smoothly scroll the prediction analytics hub into view so the user can see the 5 predicted numbers instantly
       setTimeout(() => {
@@ -98,13 +134,144 @@ export default function PredictionHub({ results, latestInsertedDraw, onClearLate
             ))}
           </select>
           <button
-            onClick={() => fetchPrediction(selectedGame)}
+            onClick={() => fetchPrediction(selectedGame, strategy)}
             disabled={loading}
             className="p-2 border border-slate-200 text-slate-500 hover:text-indigo-600 hover:bg-slate-50 rounded-lg transition disabled:opacity-50 cursor-pointer flex items-center justify-center"
             title="Recalculate predictions"
             id="predict-refresh-btn"
           >
             <RotateCw size={14} className={loading ? "animate-spin text-indigo-600" : ""} />
+          </button>
+        </div>
+      </div>
+
+      {/* Target Draw Schedule Settings */}
+      <div className="bg-slate-50/50 border border-slate-200/60 rounded-xl p-4 space-y-3">
+        <div className="flex items-center gap-1.5">
+          <span className="p-1 bg-indigo-50 text-indigo-600 rounded-md shrink-0">
+            <Sparkles size={12} className="text-indigo-600 animate-pulse" />
+          </span>
+          <span className="text-[11px] font-black uppercase text-slate-500 tracking-wider">
+            Target Event / Draw Schedule Configuration
+          </span>
+        </div>
+        
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Input 1: Event/Draw Name */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-tight">
+              Event / Draw Name
+            </label>
+            <input
+              type="text"
+              value={targetEventName}
+              onChange={(e) => setTargetEventName(e.target.value)}
+              placeholder="e.g. MAD MAX SPECIAL"
+              className="w-full px-3 py-1.5 bg-white border border-slate-200 text-xs font-semibold rounded-lg focus:outline-hidden focus:ring-1 focus:ring-indigo-500 text-slate-700"
+              id="predict-target-name-input"
+            />
+          </div>
+
+          {/* Input 2: Target Date */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-tight">
+              Target Draw Date
+            </label>
+            <input
+              type="date"
+              value={targetDate}
+              onChange={(e) => setTargetDate(e.target.value)}
+              className="w-full px-3 py-1.5 bg-white border border-slate-200 text-xs font-semibold rounded-lg focus:outline-hidden focus:ring-1 focus:ring-indigo-500 text-slate-700"
+              id="predict-target-date-input"
+            />
+          </div>
+
+          {/* Input 3: Target Time */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-tight">
+              Target Draw Time
+            </label>
+            <input
+              type="time"
+              value={targetTime}
+              onChange={(e) => setTargetTime(e.target.value)}
+              className="w-full px-3 py-1.5 bg-white border border-slate-200 text-xs font-semibold rounded-lg focus:outline-hidden focus:ring-1 focus:ring-indigo-500 text-slate-700"
+              id="predict-target-time-input"
+            />
+          </div>
+        </div>
+        <p className="text-[9px] text-slate-400">
+          * Modifying any setting above dynamically adjusts historical trend analysis and updates prediction reasoning details below.
+        </p>
+      </div>
+
+      {/* Prediction Strategy Selector Grid */}
+      <div className="space-y-2">
+        <label className="text-[11px] font-black uppercase text-slate-400 tracking-wider">
+          Prediction Mode & Target Strategy
+        </label>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {/* Strategy 1: Balanced */}
+          <button
+            onClick={() => setStrategy("balanced")}
+            className={`text-left p-3.5 rounded-xl border transition cursor-pointer flex flex-col justify-between ${
+              strategy === "balanced"
+                ? "bg-indigo-50/55 border-indigo-200 ring-2 ring-indigo-500/10"
+                : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/50"
+            }`}
+            id="strategy-balanced-btn"
+          >
+            <div className="flex items-center gap-1.5">
+              <span className={`p-1 rounded-md ${strategy === "balanced" ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500"}`}>
+                <Hash size={12} />
+              </span>
+              <span className="text-xs font-extrabold text-slate-800">Balanced Statistical</span>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-2 leading-relaxed">
+              Blends Hot (frequent) and Cold (overdue) numbers representing classic probability distributions.
+            </p>
+          </button>
+
+          {/* Strategy 2: Pure Evens */}
+          <button
+            onClick={() => setStrategy("evens")}
+            className={`text-left p-3.5 rounded-xl border transition cursor-pointer flex flex-col justify-between ${
+              strategy === "evens"
+                ? "bg-indigo-50/55 border-indigo-200 ring-2 ring-indigo-500/10"
+                : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/50"
+            }`}
+            id="strategy-evens-btn"
+          >
+            <div className="flex items-center gap-1.5">
+              <span className={`p-1 rounded-md ${strategy === "evens" ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500"}`}>
+                <PlaySquare size={12} />
+              </span>
+              <span className="text-xs font-extrabold text-slate-800">Pure Evens Priority</span>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-2 leading-relaxed">
+              Filters prediction models strictly to Even-numbered outcomes based on historical recurring frequencies.
+            </p>
+          </button>
+
+          {/* Strategy 3: Counter-Movement Evens ("According to Evens, whichever is next") */}
+          <button
+            onClick={() => setStrategy("evens-next")}
+            className={`text-left p-3.5 rounded-xl border transition cursor-pointer flex flex-col justify-between ${
+              strategy === "evens-next"
+                ? "bg-gradient-to-br from-indigo-50/80 to-indigo-50/40 border-indigo-300 ring-2 ring-indigo-500/10"
+                : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/50"
+            }`}
+            id="strategy-evens-next-btn"
+          >
+            <div className="flex items-center gap-1.5">
+              <span className="p-1 rounded-md bg-indigo-600 text-white animate-pulse">
+                <Sparkles size={12} />
+              </span>
+              <span className="text-xs font-extrabold text-slate-800">Evens-Next (Counter Movement)</span>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-2 leading-relaxed">
+              <strong>"According to evens, whichever is next"</strong> — extracts active even counterparts triggered by the last drawn balls using the 90-ball movement sheet.
+            </p>
           </button>
         </div>
       </div>
@@ -152,14 +319,25 @@ export default function PredictionHub({ results, latestInsertedDraw, onClearLate
             <div className="space-y-6 flex-1 flex flex-col justify-between">
               
               {/* Prediction Target Tagline */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs bg-indigo-600 text-white px-2.5 py-1 rounded-lg font-black tracking-tight uppercase">
-                    {selectedGame}
-                  </span>
-                  <span className="text-xs text-slate-400 font-semibold">
-                    Target Edition: <strong className="text-slate-800 font-bold">Ed. {prediction.nextEdition}</strong>
-                  </span>
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2 border-b border-slate-100 pb-3">
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs bg-indigo-600 text-white px-2.5 py-1 rounded-lg font-black tracking-tight uppercase">
+                      {targetEventName || selectedGame}
+                    </span>
+                    <span className="text-xs text-slate-400 font-semibold">
+                      Target Edition: <strong className="text-slate-800 font-bold">Ed. {prediction.nextEdition}</strong>
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 font-semibold flex items-center gap-2 flex-wrap mt-0.5">
+                    <span className="text-slate-400">Target Draw Schedule:</span>
+                    <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md text-[10px]">
+                      📅 {targetDate || "Next Draw"}
+                    </span>
+                    <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md text-[10px]">
+                      ⏰ {targetTime || "18:30"}
+                    </span>
+                  </div>
                 </div>
 
                 {/* AI / Stat Indicator */}

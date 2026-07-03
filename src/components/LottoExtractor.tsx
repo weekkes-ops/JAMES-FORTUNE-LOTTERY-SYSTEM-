@@ -173,13 +173,28 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
 
       if (stepInterval) clearInterval(stepInterval);
 
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error || "Failed to extract. Ensure GEMINI_API_KEY is configured.");
+      // Read response body as text first to handle HTML error pages gracefully
+      const responseText = await response.text();
+      let res: any;
+      try {
+        res = JSON.parse(responseText);
+      } catch (parseErr) {
+        if (!response.ok) {
+          throw new Error(`Server Error (Status ${response.status}): The request could not be processed. This can occur if the image size is too large, the server is restarting, or the request timed out. Please try resizing the image or retrying shortly.`);
+        } else {
+          throw new Error(`Invalid server response format (Status ${response.status}).`);
+        }
       }
 
-      const res = await response.json();
-      if (res.success && res.data) {
+      if (!response.ok) {
+        throw new Error(res.error || `Failed to extract. (Status ${response.status})`);
+      }
+
+      if (!res.success) {
+        throw new Error(res.error || "No structured data was returned. Please ensure the image is clear and contains a valid lottery bulletin.");
+      }
+
+      if (res.data) {
         const result: LottoResult = {
           id: "lotto-extracted-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
           gameName: (res.data.gameName || "MAD MAX").trim().toUpperCase(),

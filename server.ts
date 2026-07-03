@@ -121,8 +121,9 @@ async function startServer() {
       const extractedData = JSON.parse(jsonStr.trim());
       return res.json({ success: true, data: extractedData });
     } catch (error: any) {
-      console.error("Gemini OCR error:", error);
-      return res.status(500).json({
+      console.warn("Gemini OCR warning (handled gracefully):", error.message || error);
+      return res.status(200).json({
+        success: false,
         error: error.message || "An unexpected error occurred during image parsing.",
       });
     }
@@ -131,12 +132,37 @@ async function startServer() {
   // Lotto results prediction API
   app.post("/api/predict", async (req, res) => {
     try {
-      const { gameName, history } = req.body;
+      const { gameName, history, strategy, targetDate, targetTime, targetEventName } = req.body;
       if (!gameName) {
         return res.status(400).json({ error: "Game name is required" });
       }
 
       const client = getGeminiClient();
+
+      let strategyInstruction = "";
+      if (strategy === "evens") {
+        strategyInstruction = `
+        CRITICAL MANDATE: The user has selected the "Pure Evens" strategy.
+        - EVERY SINGLE ONE of your predicted winning numbers, predicted extra numbers, and predicted machine numbers MUST BE AN EVEN INTEGER (divisible by 2).
+        - Absolutely DO NOT include any odd numbers in your predictions.
+        `;
+      } else if (strategy === "evens-next") {
+        strategyInstruction = `
+        CRITICAL MANDATE: The user has selected "According to Evens, Whichever is Next" (Counter-Movement Evens).
+        - EVERY SINGLE ONE of your predicted winning numbers, predicted extra numbers, and predicted machine numbers MUST BE AN EVEN INTEGER (divisible by 2).
+        - Ground your prediction by taking the numbers from the last draw and selecting their historical even successors/counterparts from counter-movement theory.
+        - Absolutely DO NOT include any odd numbers in your predictions.
+        `;
+      }
+
+      const scheduleDetails = `
+      UPCOMING PREDICTION DRAW TARGET CONFIGURATION:
+      - Draw Event Name: ${targetEventName || gameName}
+      - Target Draw Date: ${targetDate || "Not specified"}
+      - Target Draw Time: ${targetTime || "Not specified"}
+      
+      CRITICAL INSTRUCTION: In your reasoning analysis, you MUST explicitly mention and base the forecasting on this specific target draw date, time, and event name (e.g., "Predictive analysis calculated for the ${targetEventName || gameName} draw scheduled on ${targetDate || "upcoming date"} at ${targetTime || "upcoming time"}").
+      `;
 
       // We will provide a neat prompt that passes the history of recent draws for this game,
       // and asks Gemini to output exactly 5 predicted numbers (between 1 and 90), 2 extra numbers,
@@ -147,6 +173,9 @@ async function startServer() {
         ${JSON.stringify(history, null, 2)}
 
         Based on these historical results, predict the outcomes of the next game (next edition).
+        ${strategyInstruction}
+        ${scheduleDetails}
+
         Return:
         1. A list of exactly 5 predicted winning numbers (each between 1 and 90, unique, sorted).
         2. A list of exactly 2 predicted extra numbers (each between 1 and 90, unique, sorted).
@@ -201,8 +230,9 @@ async function startServer() {
       const predictionData = JSON.parse(jsonStr.trim());
       return res.json({ success: true, data: predictionData });
     } catch (error: any) {
-      console.error("Gemini Prediction error:", error);
-      return res.status(500).json({
+      console.warn("Gemini Prediction warning (handled gracefully):", error.message || error);
+      return res.status(200).json({
+        success: false,
         error: error.message || "An unexpected error occurred during prediction generation.",
       });
     }

@@ -6,6 +6,7 @@ import ResultsTable from "./components/ResultsTable";
 import LottoExtractor from "./components/LottoExtractor";
 import VisualSlipCard from "./components/VisualSlipCard";
 import PredictionHub from "./components/PredictionHub";
+import BallMovementGuide from "./components/BallMovementGuide";
 import { HelpCircle, ChevronLeft, ChevronRight, SlidersHorizontal, Layers, RotateCcw } from "lucide-react";
 import { normalizeDateToYMD } from "./utils/dateUtils";
 import { collection, onSnapshot } from "firebase/firestore";
@@ -538,6 +539,9 @@ export default function App() {
           latestInsertedDraw={latestInsertedDraw} 
           onClearLatestDraw={() => setLatestInsertedDraw(null)} 
         />
+
+        {/* Section: 90 Balls Movement Guide */}
+        <BallMovementGuide results={results} />
 
         {/* Section: Interactive Ledger */}
         <ResultsTable
