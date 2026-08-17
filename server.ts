@@ -39,6 +39,91 @@ async function startServer() {
     res.json({ status: "healthy", keyConfigured: !!process.env.GEMINI_API_KEY });
   });
 
+  // Clean and format error messages to be user-friendly rather than raw JSON strings
+  function cleanErrorMessage(error: any): string {
+    if (!error) return "An unexpected error occurred.";
+    let msg = error.message || String(error);
+
+    try {
+      if (typeof msg === "string" && (msg.startsWith("{") || msg.includes('{"error":'))) {
+        const jsonStart = msg.indexOf("{");
+        const jsonEnd = msg.lastIndexOf("}");
+        if (jsonStart !== -1 && jsonEnd !== -1) {
+          const parsed = JSON.parse(msg.substring(jsonStart, jsonEnd + 1));
+          if (parsed?.error?.message) {
+            msg = parsed.error.message;
+          }
+        }
+      }
+    } catch {
+      // Ignore JSON parse errors and continue
+    }
+
+    if (msg.includes("503") || msg.includes("high demand") || msg.includes("UNAVAILABLE")) {
+      return "The AI service is temporarily experiencing high demand. Please retry in a few moments.";
+    }
+    if (msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED")) {
+      return "Rate limit reached. Please wait a moment before trying again.";
+    }
+
+    return msg;
+  }
+
+  // Resilient generateContent helper with automatic exponential backoff retry and model fallback
+  async function generateContentWithRetry(
+    client: GoogleGenAI,
+    params: {
+      models?: string[];
+      contents: any;
+      config?: any;
+      maxAttempts?: number;
+    }
+  ) {
+    const candidateModels = params.models || ["gemini-3.7-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+    const maxAttempts = params.maxAttempts || 3;
+    let lastError: any = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const modelToUse = candidateModels[Math.min(attempt, candidateModels.length - 1)];
+
+      try {
+        const response = await client.models.generateContent({
+          model: modelToUse,
+          contents: params.contents,
+          config: params.config,
+        });
+
+        if (response && response.text) {
+          return response;
+        }
+        throw new Error(`Empty response received from AI model ${modelToUse}`);
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = err?.message || String(err);
+        const isTransient =
+          errMsg.includes("503") ||
+          errMsg.includes("429") ||
+          errMsg.includes("UNAVAILABLE") ||
+          errMsg.includes("RESOURCE_EXHAUSTED") ||
+          errMsg.includes("high demand") ||
+          errMsg.includes("overloaded") ||
+          errMsg.includes("fetch failed") ||
+          errMsg.includes("ECONNRESET");
+
+        console.warn(`[Gemini Attempt ${attempt + 1}/${maxAttempts}] Model ${modelToUse} error:`, errMsg);
+
+        if (isTransient && attempt < maxAttempts - 1) {
+          const delay = Math.pow(2, attempt) * 800 + Math.random() * 300;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        } else if (!isTransient && attempt >= candidateModels.length - 1) {
+          throw err;
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
   // Lotto results image extraction API
   app.post("/api/extract", async (req, res) => {
     try {
@@ -58,8 +143,8 @@ async function startServer() {
         base64Data = match[2];
       }
 
-      const response = await client.models.generateContent({
-        model: "gemini-3.5-flash",
+      const response = await generateContentWithRetry(client, {
+        models: ["gemini-3.7-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"],
         contents: [
           {
             inlineData: {
@@ -121,10 +206,11 @@ async function startServer() {
       const extractedData = JSON.parse(jsonStr.trim());
       return res.json({ success: true, data: extractedData });
     } catch (error: any) {
-      console.warn("Gemini OCR warning (handled gracefully):", error.message || error);
+      const sanitizedMessage = cleanErrorMessage(error);
+      console.warn("Gemini OCR warning (handled gracefully):", sanitizedMessage);
       return res.status(200).json({
         success: false,
-        error: error.message || "An unexpected error occurred during image parsing.",
+        error: sanitizedMessage,
       });
     }
   });
@@ -164,9 +250,6 @@ async function startServer() {
       CRITICAL INSTRUCTION: In your reasoning analysis, you MUST explicitly mention and base the forecasting on this specific target draw date, time, and event name (e.g., "Predictive analysis calculated for the ${targetEventName || gameName} draw scheduled on ${targetDate || "upcoming date"} at ${targetTime || "upcoming time"}").
       `;
 
-      // We will provide a neat prompt that passes the history of recent draws for this game,
-      // and asks Gemini to output exactly 5 predicted numbers (between 1 and 90), 2 extra numbers,
-      // and a detailed reason/rationale.
       const prompt = `
         You are an expert lottery analyst for the JAMES FORTUNE LOTTERY SYSTEM.
         Analyze the historical draw results for the game "${gameName}" provided below:
@@ -185,8 +268,8 @@ async function startServer() {
         Make sure your analysis is grounded in the actual history provided (e.g. "Number 79 appeared 3 times recently").
       `;
 
-      const response = await client.models.generateContent({
-        model: "gemini-2.5-flash",
+      const response = await generateContentWithRetry(client, {
+        models: ["gemini-3.7-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"],
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -230,10 +313,11 @@ async function startServer() {
       const predictionData = JSON.parse(jsonStr.trim());
       return res.json({ success: true, data: predictionData });
     } catch (error: any) {
-      console.warn("Gemini Prediction warning (handled gracefully):", error.message || error);
+      const sanitizedMessage = cleanErrorMessage(error);
+      console.warn("Gemini Prediction warning (handled gracefully):", sanitizedMessage);
       return res.status(200).json({
         success: false,
-        error: error.message || "An unexpected error occurred during prediction generation.",
+        error: sanitizedMessage,
       });
     }
   });
