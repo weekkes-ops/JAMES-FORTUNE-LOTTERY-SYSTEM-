@@ -490,10 +490,21 @@ export const PRELOADED_LOTTO_RESULTS: LottoResult[] = [
     winningNumbers: [53, 85, 71, 80, 59],
     extraNumbers: [90, 72],
     machineNumbers: [61, 35, 20, 32, 26]
+  },
+  {
+    id: "lotto-rokel-253",
+    gameName: "ROKEL RIVER",
+    date: "2026-08-17", // Monday, 17th August, 2026
+    time: "9AM",
+    edition: "253",
+    winningNumbers: [10, 31, 64, 19, 40],
+    extraNumbers: [73, 39],
+    machineNumbers: [27, 33, 14, 65, 12]
   }
 ];
 
 export const GAME_COLORS: { [key: string]: string } = {
+  "ROKEL RIVER": "from-teal-600 to-emerald-700 border-teal-500",
   "MAD MAX": "from-amber-600 to-orange-700 border-orange-500",
   "MANO": "from-emerald-600 to-teal-700 border-emerald-500",
   "NATIONAL": "from-blue-600 to-indigo-700 border-blue-500",

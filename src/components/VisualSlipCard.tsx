@@ -13,6 +13,15 @@ export default function VisualSlipCard({ result, isSelected, onSelect }: VisualS
   // Generate stylized backgrounds matching the 10 uploaded images
   const getStyleTheme = (gameName: string) => {
     switch (gameName) {
+      case "ROKEL RIVER":
+        return {
+          bg: "bg-gradient-to-b from-emerald-600 via-teal-700 to-slate-900",
+          accentColor: "text-emerald-100",
+          ballBg: "bg-amber-950 text-amber-100 border-amber-800",
+          extraBallBg: "bg-orange-600 text-white border-orange-500",
+          machineBallBg: "bg-blue-600 text-white border-blue-500",
+          sub: "MONDAY • 9AM • Edition 253"
+        };
       case "MAD MAX":
         return {
           bg: "bg-gradient-to-b from-orange-400 via-orange-500 to-amber-600",

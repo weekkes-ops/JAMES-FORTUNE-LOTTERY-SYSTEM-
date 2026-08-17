@@ -10,9 +10,21 @@ interface PredictionHubProps {
 }
 
 export default function PredictionHub({ results, latestInsertedDraw, onClearLatestDraw }: PredictionHubProps) {
-  // Extract unique games dynamically from results list
-  const games = Array.from(new Set(results.map((r) => r.gameName))).sort();
-  const [selectedGame, setSelectedGame] = useState<string>(games[0] || "MAD MAX");
+  // Sort games dynamically with the most recently drawn games first
+  const gameLatestDateMap: Record<string, number> = {};
+  results.forEach((r) => {
+    const time = new Date(r.date).getTime() || 0;
+    if (!gameLatestDateMap[r.gameName] || time > gameLatestDateMap[r.gameName]) {
+      gameLatestDateMap[r.gameName] = time;
+    }
+  });
+
+  const games = Array.from(new Set(results.map((r) => r.gameName))).sort((a, b) => {
+    const diff = (gameLatestDateMap[b] || 0) - (gameLatestDateMap[a] || 0);
+    return diff !== 0 ? diff : a.localeCompare(b);
+  });
+
+  const [selectedGame, setSelectedGame] = useState<string>(games[0] || "ROKEL RIVER");
   const [strategy, setStrategy] = useState<PredictionStrategy>("balanced");
   const [targetEventName, setTargetEventName] = useState<string>("");
   const [targetDate, setTargetDate] = useState<string>("");

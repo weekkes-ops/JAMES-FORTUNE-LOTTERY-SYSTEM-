@@ -146,6 +146,17 @@ export default function App() {
           fetchedResults.push(doc.data() as LottoResult);
         });
 
+        // Automatically sync any missing preloaded results (like the newly added ROKEL RIVER Edition 253) into Firestore
+        PRELOADED_LOTTO_RESULTS.forEach((pre) => {
+          const exists = fetchedResults.some(
+            (f) => f.id === pre.id || (f.gameName.trim().toUpperCase() === pre.gameName.trim().toUpperCase() && f.edition.trim() === pre.edition.trim())
+          );
+          if (!exists) {
+            fetchedResults.push(pre);
+            addLottoResultToFirestore(pre).catch((err) => console.warn("Auto-sync draw to firestore error:", err));
+          }
+        });
+
         const sorted = fetchedResults.sort((a, b) => {
           const dateComp = b.date.localeCompare(a.date);
           if (dateComp !== 0) return dateComp;

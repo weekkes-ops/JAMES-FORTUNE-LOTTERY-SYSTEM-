@@ -16,10 +16,13 @@ import {
   TrendingUp,
   Brain,
   ArrowRight,
-  Zap
+  Zap,
+  Info
 } from "lucide-react";
 import { normalizeDateToYMD } from "../utils/dateUtils";
 import { calculateLocalStatisticalPrediction, PredictionData } from "../utils/predictionEngine";
+import { optimizeImageForOcr } from "../utils/imageOptimizer";
+import { directClientExtract } from "../services/geminiClientService";
 
 interface LottoExtractorProps {
   results: LottoResult[];
@@ -120,19 +123,31 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
 
     setGlobalError(null);
 
-    const loadPromises = validFiles.map((file) => {
-      return new Promise<ImageQueueItem>((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          resolve({
-            id: "img-" + Date.now() + "-" + Math.random().toString(36).substr(2, 5),
-            file,
-            preview: reader.result as string,
-            status: "pending",
-          });
+    const loadPromises = validFiles.map(async (file) => {
+      try {
+        // Optimize and downscale large mobile camera images to prevent 413/404/payload limits
+        const { optimizedBase64 } = await optimizeImageForOcr(file, 1600, 0.86);
+        return {
+          id: "img-" + Date.now() + "-" + Math.random().toString(36).substr(2, 5),
+          file,
+          preview: optimizedBase64,
+          status: "pending" as const,
         };
-        reader.readAsDataURL(file);
-      });
+      } catch (optErr) {
+        // Fallback to standard FileReader if canvas downscaling fails
+        return new Promise<ImageQueueItem>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            resolve({
+              id: "img-" + Date.now() + "-" + Math.random().toString(36).substr(2, 5),
+              file,
+              preview: reader.result as string,
+              status: "pending",
+            });
+          };
+          reader.readAsDataURL(file);
+        });
+      }
     });
 
     const loadedItems = await Promise.all(loadPromises);
@@ -220,70 +235,107 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
     }
 
     try {
-      const response = await fetch("/api/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          image: item.preview,
-          mimeType: item.file.type || "image/jpeg",
-        }),
-      });
+      let extractedResult: LottoResult | null = null;
 
-      if (stepInterval) clearInterval(stepInterval);
-
-      // Read response body as text first to handle HTML error pages gracefully
-      const responseText = await response.text();
-      let res: any;
+      // 1. First attempt: standard server/serverless /api/extract endpoint
+      let response: Response | null = null;
       try {
-        res = JSON.parse(responseText);
-      } catch (parseErr) {
-        if (!response.ok) {
-          throw new Error(`Server Error (Status ${response.status}): The request could not be processed. This can occur if the image size is too large, the server is restarting, or the request timed out. Please try resizing the image or retrying shortly.`);
+        response = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image: item.preview,
+            mimeType: item.file.type || "image/jpeg",
+          }),
+        });
+      } catch (fetchErr: any) {
+        console.warn("API fetch error, checking fallback:", fetchErr);
+      }
+
+      if (response && response.ok) {
+        const responseText = await response.text();
+        let res: any;
+        try {
+          res = JSON.parse(responseText);
+        } catch {
+          throw new Error("Invalid response format from server.");
+        }
+
+        if (!res.success) {
+          throw new Error(res.error || "No structured data was returned. Please ensure the image is clear.");
+        }
+
+        if (res.data) {
+          extractedResult = {
+            id: "lotto-extracted-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+            gameName: (res.data.gameName || "MAD MAX").trim().toUpperCase(),
+            edition: (res.data.edition || "").trim(),
+            date: normalizeDateToYMD(res.data.date),
+            time: (res.data.time || "18:30").trim(),
+            winningNumbers: Array.isArray(res.data.winningNumbers)
+              ? res.data.winningNumbers.map(Number)
+              : [],
+            extraNumbers: Array.isArray(res.data.extraNumbers)
+              ? res.data.extraNumbers.map(Number)
+              : [],
+            machineNumbers: Array.isArray(res.data.machineNumbers)
+              ? res.data.machineNumbers.map(Number)
+              : [],
+          };
+        }
+      } else if (response && response.status === 404) {
+        // If 404 on Vercel/custom hosting, attempt client fallback if available
+        try {
+          const clientFallback = await directClientExtract(item.preview, item.file.type);
+          if (clientFallback) {
+            extractedResult = clientFallback;
+          } else {
+            throw new Error(
+              "API Route Missing (Status 404): The serverless endpoint (/api/extract) was not reached. Please ensure your Vercel deployment has GEMINI_API_KEY set in Project Settings > Environment Variables, and that the latest serverless API files are deployed."
+            );
+          }
+        } catch (fbErr: any) {
+          throw new Error(
+            fbErr.message ||
+              "API Route Missing (Status 404): The serverless endpoint (/api/extract) was not reached. Please ensure your Vercel deployment has GEMINI_API_KEY set in Project Settings > Environment Variables."
+          );
+        }
+      } else if (response) {
+        const responseText = await response.text();
+        let res: any;
+        try {
+          res = JSON.parse(responseText);
+        } catch {
+          throw new Error(`Server Error (Status ${response.status}): The request could not be processed. Please try again shortly.`);
+        }
+        throw new Error(res.error || `Server Error (Status ${response.status})`);
+      } else {
+        // Response was null (fetch failed / network disconnected)
+        const clientFallback = await directClientExtract(item.preview, item.file.type);
+        if (clientFallback) {
+          extractedResult = clientFallback;
         } else {
-          throw new Error(`Invalid server response format (Status ${response.status}).`);
+          throw new Error("Network error: Unable to connect to extraction endpoint. Please check your internet connection.");
         }
       }
 
-      if (!response.ok) {
-        throw new Error(res.error || `Failed to extract. (Status ${response.status})`);
-      }
+      if (stepInterval) clearInterval(stepInterval);
 
-      if (!res.success) {
-        throw new Error(res.error || "No structured data was returned. Please ensure the image is clear and contains a valid lottery bulletin.");
-      }
-
-      if (res.data) {
-        const result: LottoResult = {
-          id: "lotto-extracted-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
-          gameName: (res.data.gameName || "MAD MAX").trim().toUpperCase(),
-          edition: (res.data.edition || "").trim(),
-          date: normalizeDateToYMD(res.data.date),
-          time: (res.data.time || "18:30").trim(),
-          winningNumbers: Array.isArray(res.data.winningNumbers)
-            ? res.data.winningNumbers.map(Number)
-            : [],
-          extraNumbers: Array.isArray(res.data.extraNumbers)
-            ? res.data.extraNumbers.map(Number)
-            : [],
-          machineNumbers: Array.isArray(res.data.machineNumbers)
-            ? res.data.machineNumbers.map(Number)
-            : [],
-        };
-
+      if (extractedResult) {
         setQueue((prev) =>
           prev.map((q) =>
             q.id === itemId
               ? {
                   ...q,
                   status: "success",
-                  extractedData: result,
+                  extractedData: extractedResult!,
                 }
               : q
           )
         );
         return true;
       } else {
-        throw new Error("No structured data was returned from the OCR engine.");
+        throw new Error("No structured lotto data was returned.");
       }
     } catch (err: any) {
       if (stepInterval) clearInterval(stepInterval);

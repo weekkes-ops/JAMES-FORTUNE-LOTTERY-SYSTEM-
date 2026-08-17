@@ -59,11 +59,11 @@ async function startServer() {
       // Ignore JSON parse errors and continue
     }
 
-    if (msg.includes("503") || msg.includes("high demand") || msg.includes("UNAVAILABLE")) {
-      return "The AI service is temporarily experiencing high demand. Please retry in a few moments.";
+    if (msg.includes("Quota exceeded") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("429")) {
+      return "Gemini API free tier rate limit reached. Please wait 30 seconds before uploading again, or provide a paid key in Settings.";
     }
-    if (msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED")) {
-      return "Rate limit reached. Please wait a moment before trying again.";
+    if (msg.includes("503") || msg.includes("high demand") || msg.includes("UNAVAILABLE")) {
+      return "The AI service is temporarily experiencing high traffic. Please retry in a few moments.";
     }
 
     return msg;
@@ -79,12 +79,11 @@ async function startServer() {
       maxAttempts?: number;
     }
   ) {
-    const candidateModels = params.models || ["gemini-3.7-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
-    const maxAttempts = params.maxAttempts || 3;
+    const candidateModels = params.models || ["gemini-3.1-flash-lite", "gemini-3.7-flash"];
     let lastError: any = null;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const modelToUse = candidateModels[Math.min(attempt, candidateModels.length - 1)];
+    for (let i = 0; i < candidateModels.length; i++) {
+      const modelToUse = candidateModels[i];
 
       try {
         const response = await client.models.generateContent({
@@ -100,23 +99,18 @@ async function startServer() {
       } catch (err: any) {
         lastError = err;
         const errMsg = err?.message || String(err);
-        const isTransient =
-          errMsg.includes("503") ||
-          errMsg.includes("429") ||
-          errMsg.includes("UNAVAILABLE") ||
-          errMsg.includes("RESOURCE_EXHAUSTED") ||
-          errMsg.includes("high demand") ||
-          errMsg.includes("overloaded") ||
-          errMsg.includes("fetch failed") ||
-          errMsg.includes("ECONNRESET");
+        console.warn(`[Gemini Model ${modelToUse} failed]:`, errMsg);
 
-        console.warn(`[Gemini Attempt ${attempt + 1}/${maxAttempts}] Model ${modelToUse} error:`, errMsg);
+        // If it's a quota or rate limit error on this model, immediately try the next model without delay
+        const isQuotaError = errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("Quota exceeded");
+        if (isQuotaError && i < candidateModels.length - 1) {
+          console.warn(`[Gemini Failover]: 429 quota on ${modelToUse}, switching immediately to ${candidateModels[i + 1]}`);
+          continue;
+        }
 
-        if (isTransient && attempt < maxAttempts - 1) {
-          const delay = Math.pow(2, attempt) * 800 + Math.random() * 300;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        } else if (!isTransient && attempt >= candidateModels.length - 1) {
-          throw err;
+        // For temporary 503 errors, briefly pause before trying next candidate
+        if (i < candidateModels.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 600));
         }
       }
     }
@@ -269,7 +263,7 @@ async function startServer() {
       `;
 
       const response = await generateContentWithRetry(client, {
-        models: ["gemini-3.7-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"],
+        models: ["gemini-3.1-flash-lite", "gemini-3.7-flash"],
         contents: prompt,
         config: {
           responseMimeType: "application/json",
