@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from "react";
+import React, { useState, useRef, useMemo, useEffect } from "react";
 import { LottoResult } from "../types";
 import { 
   Upload, 
@@ -17,7 +17,15 @@ import {
   Brain,
   ArrowRight,
   Zap,
-  Info
+  Info,
+  Edit3,
+  ZoomIn,
+  ZoomOut,
+  RotateCw,
+  X,
+  Maximize2,
+  ExternalLink,
+  HelpCircle
 } from "lucide-react";
 import { normalizeDateToYMD } from "../utils/dateUtils";
 import { calculateLocalStatisticalPrediction, PredictionData } from "../utils/predictionEngine";
@@ -36,6 +44,59 @@ interface ImageQueueItem {
   status: "pending" | "extracting" | "success" | "failed" | "committed";
   error?: string;
   extractedData?: LottoResult;
+  isManualDraft?: boolean;
+}
+
+// Available lottery games list for fast dropdown selection
+const COMMON_GAMES = [
+  "BOMBALI SPECIAL",
+  "MAD MAX",
+  "MANO",
+  "NATIONAL",
+  "ROKEL RIVER",
+  "PENINSULAR",
+  "DAILY SPECIAL",
+  "COTTON TREE",
+  "TONKOLILI SPECIAL",
+  "KOINADUGU SPECIAL",
+  "KANGARI"
+];
+
+// Helper to intelligently infer game name and edition from file name
+function inferSlipDetailsFromFilename(filename: string, existingResults: LottoResult[]): { gameName: string; edition: string; time: string } {
+  const upper = filename.toUpperCase();
+  
+  // Extract number sequences for edition (e.g. 82361.jpg -> 82361)
+  const numberMatch = filename.match(/\d{3,6}/);
+  const edition = numberMatch ? numberMatch[0] : "";
+
+  // Infer game name
+  let gameName = "BOMBALI SPECIAL";
+  if (upper.includes("BOMBALI")) gameName = "BOMBALI SPECIAL";
+  else if (upper.includes("MAD") || upper.includes("MAX")) gameName = "MAD MAX";
+  else if (upper.includes("MANO")) gameName = "MANO";
+  else if (upper.includes("NATIONAL")) gameName = "NATIONAL";
+  else if (upper.includes("ROKEL")) gameName = "ROKEL RIVER";
+  else if (upper.includes("PENINSULAR")) gameName = "PENINSULAR";
+  else if (upper.includes("COTTON")) gameName = "COTTON TREE";
+  else if (upper.includes("TONKOLILI")) gameName = "TONKOLILI SPECIAL";
+  else if (upper.includes("KOINADUGU")) gameName = "KOINADUGU SPECIAL";
+  else if (upper.includes("KANGARI")) gameName = "KANGARI";
+  else if (upper.includes("DAILY")) gameName = "DAILY SPECIAL";
+  else if (existingResults.length > 0) {
+    gameName = existingResults[0].gameName;
+  }
+
+  // Infer time
+  let time = "18:30";
+  if (upper.includes("11AM") || upper.includes("11_AM")) time = "11:00 AM";
+  else if (upper.includes("2PM") || upper.includes("2_PM") || upper.includes("14")) time = "2:00 PM";
+  else if (upper.includes("4PM") || upper.includes("4_PM") || upper.includes("16")) time = "4:00 PM";
+  else if (upper.includes("6PM") || upper.includes("6_PM") || upper.includes("18")) time = "6:00 PM";
+  else if (upper.includes("8PM") || upper.includes("8_PM") || upper.includes("20")) time = "8:00 PM";
+  else if (upper.includes("9AM") || upper.includes("9_AM")) time = "9:00 AM";
+
+  return { gameName, edition, time };
 }
 
 export default function LottoExtractor({ results, onExtractionComplete }: LottoExtractorProps) {
@@ -46,8 +107,15 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [loadingStep, setLoadingStep] = useState(0);
   const [autoExtractOnUpload, setAutoExtractOnUpload] = useState<boolean>(true);
+  const [isApiKeyConfigured, setIsApiKeyConfigured] = useState<boolean | null>(null);
+
+  // Modal zoom states for inspecting high-res slip image
+  const [zoomModalItem, setZoomModalItem] = useState<ImageQueueItem | null>(null);
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [rotationAngle, setRotationAngle] = useState<number>(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const winningInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   // Rotating loading messages for extraction progress
   const loadingSteps = [
@@ -59,6 +127,22 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
     "Predicting next winning numbers with AI..."
   ];
 
+  // Check health and API key configuration on mount
+  useEffect(() => {
+    async function checkHealth() {
+      try {
+        const res = await fetch("/api/health");
+        if (res.ok) {
+          const data = await res.json();
+          setIsApiKeyConfigured(data.keyConfigured ?? false);
+        }
+      } catch (err) {
+        console.warn("Health check error:", err);
+      }
+    }
+    checkHealth();
+  }, []);
+
   // Selected queue item
   const selectedItem = useMemo(() => {
     return queue.find((item) => item.id === selectedItemId) || null;
@@ -68,7 +152,11 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
   const instantPrediction = useMemo<PredictionData | null>(() => {
     if (!selectedItem || !selectedItem.extractedData) return null;
     const itemData = selectedItem.extractedData;
-    // Blend current database history with the newly extracted draw
+    
+    // Only calculate if at least 3 winning numbers are non-zero
+    const validWinningCount = (itemData.winningNumbers || []).filter((n) => n > 0).length;
+    if (validWinningCount < 3) return null;
+
     const combinedHistory = [
       itemData,
       ...results.filter(
@@ -91,6 +179,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
   const isDuplicateOfExisting = useMemo(() => {
     if (!selectedItem || !selectedItem.extractedData) return false;
     const cur = selectedItem.extractedData;
+    if (!cur.gameName || !cur.date || !cur.time) return false;
     return results.some(
       (r) =>
         r.gameName.trim().toLowerCase() === cur.gameName.trim().toLowerCase() &&
@@ -98,6 +187,46 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
         r.time.trim().toLowerCase() === cur.time.trim().toLowerCase()
     );
   }, [selectedItem, results]);
+
+  // Convert a queue item into a manual editable draft with smart inferencing
+  const convertToManualDraft = (item: ImageQueueItem): ImageQueueItem => {
+    const inferred = inferSlipDetailsFromFilename(item.file.name, results);
+    const today = new Date().toISOString().split("T")[0];
+
+    const draftData: LottoResult = item.extractedData || {
+      id: "lotto-manual-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
+      gameName: inferred.gameName,
+      edition: inferred.edition || "1",
+      date: today,
+      time: inferred.time || "18:30",
+      winningNumbers: [0, 0, 0, 0, 0],
+      extraNumbers: [0, 0],
+      machineNumbers: [0, 0, 0, 0, 0],
+    };
+
+    return {
+      ...item,
+      status: "success",
+      error: undefined,
+      isManualDraft: true,
+      extractedData: draftData,
+    };
+  };
+
+  // Turn a single item in queue into editable manual mode
+  const handleMakeManual = (itemId: string) => {
+    setQueue((prev) =>
+      prev.map((q) => (q.id === itemId ? convertToManualDraft(q) : q))
+    );
+    setSelectedItemId(itemId);
+  };
+
+  // Convert all items in queue that are failed or pending to manual drafts at once
+  const handleConvertAllToManual = () => {
+    setQueue((prev) =>
+      prev.map((q) => (q.status === "failed" || q.status === "pending" ? convertToManualDraft(q) : q))
+    );
+  };
 
   // Handle file uploads (both drag-and-drop and manual select)
   const handleFiles = async (files: FileList) => {
@@ -125,7 +254,6 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
 
     const loadPromises = validFiles.map(async (file) => {
       try {
-        // Optimize and downscale large mobile camera images to prevent 413/404/payload limits
         const { optimizedBase64 } = await optimizeImageForOcr(file, 1600, 0.86);
         return {
           id: "img-" + Date.now() + "-" + Math.random().toString(36).substr(2, 5),
@@ -134,7 +262,6 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
           status: "pending" as const,
         };
       } catch (optErr) {
-        // Fallback to standard FileReader if canvas downscaling fails
         return new Promise<ImageQueueItem>((resolve) => {
           const reader = new FileReader();
           reader.onloadend = () => {
@@ -155,7 +282,6 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
     let newlyAddedIds: string[] = [];
 
     setQueue((prev) => {
-      // Filter out files already added in this session by name + size
       const filteredLoaded = loadedItems.filter(
         (loaded) => !prev.some((item) => item.file.name === loaded.file.name && item.file.size === loaded.file.size)
       );
@@ -168,7 +294,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
       return nextQueue;
     });
 
-    // Auto-extract immediately if enabled
+    // Auto-extract immediately if enabled AND API key is configured (or if status unknown)
     if (autoExtractOnUpload && newlyAddedIds.length > 0) {
       setTimeout(() => {
         triggerAutoExtraction(newlyAddedIds);
@@ -237,7 +363,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
     try {
       let extractedResult: LottoResult | null = null;
 
-      // 1. First attempt: standard server/serverless /api/extract endpoint
+      // 1. Attempt standard server/serverless /api/extract endpoint
       let response: Response | null = null;
       try {
         response = await fetch("/api/extract", {
@@ -249,7 +375,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
           }),
         });
       } catch (fetchErr: any) {
-        console.warn("API fetch error, checking fallback:", fetchErr);
+        console.warn("API fetch error:", fetchErr);
       }
 
       if (response && response.ok) {
@@ -261,11 +387,16 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
           throw new Error("Invalid response format from server.");
         }
 
+        if (res.keyMissing) {
+          setIsApiKeyConfigured(false);
+        }
+
         if (!res.success) {
-          throw new Error(res.error || "No structured data was returned. Please ensure the image is clear.");
+          throw new Error(res.error || "Unable to extract structured lottery data from slip image.");
         }
 
         if (res.data) {
+          setIsApiKeyConfigured(true);
           extractedResult = {
             id: "lotto-extracted-" + Date.now() + "-" + Math.random().toString(36).substr(2, 4),
             gameName: (res.data.gameName || "MAD MAX").trim().toUpperCase(),
@@ -283,39 +414,13 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
               : [],
           };
         }
-      } else if (response && response.status === 404) {
-        // If 404 on Vercel/custom hosting, attempt client fallback if available
-        try {
-          const clientFallback = await directClientExtract(item.preview, item.file.type);
-          if (clientFallback) {
-            extractedResult = clientFallback;
-          } else {
-            throw new Error(
-              "API Route Missing (Status 404): The serverless endpoint (/api/extract) was not reached. Please ensure your Vercel deployment has GEMINI_API_KEY set in Project Settings > Environment Variables, and that the latest serverless API files are deployed."
-            );
-          }
-        } catch (fbErr: any) {
-          throw new Error(
-            fbErr.message ||
-              "API Route Missing (Status 404): The serverless endpoint (/api/extract) was not reached. Please ensure your Vercel deployment has GEMINI_API_KEY set in Project Settings > Environment Variables."
-          );
-        }
-      } else if (response) {
-        const responseText = await response.text();
-        let res: any;
-        try {
-          res = JSON.parse(responseText);
-        } catch {
-          throw new Error(`Server Error (Status ${response.status}): The request could not be processed. Please try again shortly.`);
-        }
-        throw new Error(res.error || `Server Error (Status ${response.status})`);
       } else {
-        // Response was null (fetch failed / network disconnected)
+        // Direct client fallback attempt
         const clientFallback = await directClientExtract(item.preview, item.file.type);
         if (clientFallback) {
           extractedResult = clientFallback;
         } else {
-          throw new Error("Network error: Unable to connect to extraction endpoint. Please check your internet connection.");
+          throw new Error("AI service not reachable. Configure GEMINI_API_KEY in Settings > Secrets or transcribe manually.");
         }
       }
 
@@ -328,6 +433,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
               ? {
                   ...q,
                   status: "success",
+                  isManualDraft: false,
                   extractedData: extractedResult!,
                 }
               : q
@@ -335,7 +441,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
         );
         return true;
       } else {
-        throw new Error("No structured lotto data was returned.");
+        throw new Error("No structured lotto data returned.");
       }
     } catch (err: any) {
       if (stepInterval) clearInterval(stepInterval);
@@ -355,7 +461,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
     }
   };
 
-  // Run extraction sequentially on all pending items in the queue
+  // Run extraction sequentially on all pending/failed items in the queue
   const handleExtractAllPending = async () => {
     const pendingItems = queue.filter((q) => q.status === "pending" || q.status === "failed");
     if (pendingItems.length === 0 || isBatchExtracting) return;
@@ -367,7 +473,6 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
       const item = pendingItems[i];
       setSelectedItemId(item.id);
       await extractItem(item.id, (step) => setLoadingStep(step));
-      // Small pause between items to prevent hitting burst rate limits when processing multiple images (e.g., 15 files)
       if (i < pendingItems.length - 1) {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
@@ -379,11 +484,19 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
   // Commit a single selected, verified result to the ledger
   const saveExtractedToLedger = () => {
     if (selectedItem && selectedItem.extractedData && selectedItem.status === "success") {
+      // Validate winning numbers
+      const nonZeroWinning = selectedItem.extractedData.winningNumbers.filter((n) => n > 0);
+      if (nonZeroWinning.length === 0) {
+        setGlobalError("Please input the 5 winning numbers for this draw before saving.");
+        return;
+      }
+
       const success = onExtractionComplete(selectedItem.extractedData);
       if (success !== false) {
         setQueue((prev) =>
           prev.map((q) => (q.id === selectedItem.id ? { ...q, status: "committed" } : q))
         );
+        setGlobalError(null);
       }
     }
   };
@@ -411,7 +524,9 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
         const data = item.extractedData;
         if (!data) return;
 
-        // Check for duplicate in live results
+        // Skip items with zero winning numbers
+        if (data.winningNumbers.every((n) => n === 0)) return;
+
         const isDuplicate = results.some(
           (r) =>
             r.gameName.trim().toLowerCase() === data.gameName.trim().toLowerCase() &&
@@ -429,7 +544,6 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
             }
           }
         } else {
-          // Flag individual item with error
           const idx = nextQueue.findIndex((q) => q.id === item.id);
           if (idx !== -1) {
             nextQueue[idx] = { ...nextQueue[idx], error: "Duplicate draw entry is blocked." };
@@ -477,8 +591,26 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
     );
   };
 
+  // Auto-focus next input when 2 digits are entered
+  const handleWinningNumberChange = (index: number, valStr: string) => {
+    if (!selectedItem || !selectedItem.extractedData) return;
+    const val = parseInt(valStr, 10);
+    const num = isNaN(val) ? 0 : Math.min(Math.max(val, 0), 90);
+    const copy = [...selectedItem.extractedData.winningNumbers];
+    copy[index] = num;
+    handleFieldChange({ winningNumbers: copy });
+
+    // If 2 digits were typed and there's a next input, focus it automatically
+    if (valStr.length >= 2 && index < 4 && winningInputRefs.current[index + 1]) {
+      winningInputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const pendingOrFailedCount = queue.filter((q) => q.status === "pending" || q.status === "failed").length;
+  const verifiedCount = queue.filter((q) => q.status === "success" && q.extractedData).length;
+
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5 space-y-5 w-full flex flex-col" id="lotto-extractor-container">
+    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 sm:p-5 space-y-4 w-full flex flex-col" id="lotto-extractor-container">
       
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
@@ -487,11 +619,11 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
             <Sparkles size={18} className="text-indigo-600 shrink-0" /> Batch Image Bulletin Extractor & Predictor
           </h2>
           <p className="text-[11px] text-slate-500 mt-0.5">
-            Upload new lottery screenshots to automatically parse results and forecast the next winning numbers.
+            Upload new lottery screenshots to automatically parse results or transcribe tickets with instant prediction forecasting.
           </p>
         </div>
         
-        <div className="flex items-center gap-3 self-start sm:self-auto flex-wrap">
+        <div className="flex items-center gap-2.5 self-start sm:self-auto flex-wrap">
           {/* Auto-Extract Toggle */}
           <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 cursor-pointer select-none bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg">
             <input
@@ -502,7 +634,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
             />
             <span className="flex items-center gap-1">
               <Zap size={12} className={autoExtractOnUpload ? "text-amber-500 fill-amber-500" : "text-slate-400"} />
-              Auto-Predict on Upload
+              Auto-Extract on Upload
             </span>
           </label>
 
@@ -518,10 +650,36 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
         </div>
       </div>
 
+      {/* Standby / API Key guidance banner */}
+      {isApiKeyConfigured === false && (
+        <div className="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-amber-900 shadow-2xs">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <Info size={16} className="text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-[11px]">AI Extraction Notice</p>
+              <p className="text-[11px] text-amber-800 leading-relaxed">
+                Add your <code className="bg-amber-100/90 text-amber-900 px-1 py-0.5 rounded font-mono font-bold text-[10px]">GEMINI_API_KEY</code> in Settings &gt; Secrets for 1-click automated OCR. In the meantime, you can easily transcribe uploaded slips manually with high-res zoom.
+              </p>
+            </div>
+          </div>
+          {pendingOrFailedCount > 0 && (
+            <button
+              onClick={handleConvertAllToManual}
+              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-extrabold rounded-lg shrink-0 transition flex items-center gap-1 cursor-pointer shadow-xs"
+            >
+              <Edit3 size={11} /> Convert {pendingOrFailedCount} to Manual Drafts
+            </button>
+          )}
+        </div>
+      )}
+
       {globalError && (
         <div className="p-3 bg-rose-50 border border-rose-100 rounded-lg flex items-start gap-2.5 text-xs text-rose-700 font-medium" id="extractor-error">
           <AlertTriangle size={16} className="shrink-0 text-rose-500 mt-0.5" />
-          <div>{globalError}</div>
+          <div className="flex-1">{globalError}</div>
+          <button onClick={() => setGlobalError(null)} className="text-rose-400 hover:text-rose-700">
+            <X size={14} />
+          </button>
         </div>
       )}
 
@@ -574,10 +732,20 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                 <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
                   <Layers size={12} className="text-slate-400" /> Queue ({queue.length} files)
                 </span>
-                <span className="text-[10px] text-slate-400 font-medium">Click item to verify details</span>
+                <div className="flex items-center gap-2">
+                  {pendingOrFailedCount > 0 && (
+                    <button
+                      onClick={handleConvertAllToManual}
+                      className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-0.5 cursor-pointer"
+                      title="Convert all unparsed images to editable manual drafts"
+                    >
+                      <Edit3 size={11} /> Transcribe All
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="max-h-60 overflow-y-auto border border-slate-100 rounded-xl divide-y divide-slate-100 pr-1 scrollbar-thin">
+              <div className="max-h-64 overflow-y-auto border border-slate-100 rounded-xl divide-y divide-slate-100 pr-1 scrollbar-thin">
                 {queue.map((item) => {
                   const isActive = item.id === selectedItemId;
                   return (
@@ -591,18 +759,33 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                       }`}
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <img
-                          src={item.preview}
-                          alt="Thumbnail"
-                          className="w-10 h-10 object-cover rounded border border-slate-200 shrink-0"
-                          referrerPolicy="no-referrer"
-                        />
+                        <div className="relative group/thumb shrink-0">
+                          <img
+                            src={item.preview}
+                            alt="Thumbnail"
+                            className="w-10 h-10 object-cover rounded border border-slate-200 shrink-0 bg-slate-100"
+                            referrerPolicy="no-referrer"
+                          />
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setZoomModalItem(item);
+                              setZoomLevel(1);
+                              setRotationAngle(0);
+                            }}
+                            className="absolute inset-0 bg-slate-900/50 text-white rounded flex items-center justify-center opacity-0 group-hover/thumb:opacity-100 transition cursor-zoom-in"
+                            title="Inspect high-resolution slip"
+                          >
+                            <ZoomIn size={12} />
+                          </button>
+                        </div>
                         <div className="min-w-0">
                           <p className="text-[11px] font-bold text-slate-700 truncate max-w-[130px]">
                             {item.file.name}
                           </p>
                           <p className="text-[10px] text-slate-400">
                             {(item.file.size / 1024).toFixed(1)} KB
+                            {item.isManualDraft && <span className="text-amber-600 font-semibold ml-1">• Draft</span>}
                           </p>
                         </div>
                       </div>
@@ -621,7 +804,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                         )}
                         {item.status === "success" && (
                           <span className="text-[9px] bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded-full font-bold uppercase shrink-0 flex items-center gap-0.5">
-                            <Sparkles size={9} className="text-amber-600" /> Parsed
+                            <Sparkles size={9} className="text-amber-600" /> {item.isManualDraft ? "Draft" : "Parsed"}
                           </span>
                         )}
                         {item.status === "committed" && (
@@ -630,9 +813,16 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                           </span>
                         )}
                         {item.status === "failed" && (
-                          <span className="text-[9px] bg-rose-50 text-rose-700 px-1.5 py-0.5 rounded-full font-bold uppercase shrink-0">
-                            Error
-                          </span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleMakeManual(item.id);
+                            }}
+                            className="text-[9px] bg-amber-50 hover:bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full font-bold uppercase shrink-0 flex items-center gap-0.5 cursor-pointer border border-amber-200 transition"
+                            title="Click to transcribe manually"
+                          >
+                            <Edit3 size={8} /> Transcribe
+                          </button>
                         )}
 
                         <button
@@ -653,7 +843,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
               <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
                 <button
                   onClick={handleExtractAllPending}
-                  disabled={isBatchExtracting || queue.filter((q) => q.status === "pending" || q.status === "failed").length === 0}
+                  disabled={isBatchExtracting || pendingOrFailedCount === 0}
                   className="py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-extrabold rounded-lg flex items-center justify-center gap-1.5 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                 >
                   {isBatchExtracting ? (
@@ -662,17 +852,17 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                     </>
                   ) : (
                     <>
-                      <Play size={12} /> Extract Pending ({queue.filter((q) => q.status === "pending" || q.status === "failed").length})
+                      <Play size={12} /> Scan Pending ({pendingOrFailedCount})
                     </>
                   )}
                 </button>
 
                 <button
                   onClick={handleCommitAllVerified}
-                  disabled={isBatchExtracting || queue.filter((q) => q.status === "success").length === 0}
+                  disabled={isBatchExtracting || verifiedCount === 0}
                   className="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-extrabold rounded-lg flex items-center justify-center gap-1.5 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  <CheckCircle2 size={12} /> Commit All ({queue.filter((q) => q.status === "success").length})
+                  <CheckCircle2 size={12} /> Commit All ({verifiedCount})
                 </button>
               </div>
 
@@ -700,42 +890,69 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                   <span className="truncate">{selectedItem.file.name}</span>
                 </span>
                 
-                <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
-                  selectedItem.status === "committed" 
-                    ? "bg-emerald-50 text-emerald-700" 
-                    : selectedItem.status === "success"
-                      ? "bg-amber-50 text-amber-700"
-                      : selectedItem.status === "failed"
-                        ? "bg-rose-50 text-rose-700"
-                        : selectedItem.status === "extracting"
-                          ? "bg-indigo-50 text-indigo-700 animate-pulse"
-                          : "bg-slate-100 text-slate-600"
-                }`}>
-                  {selectedItem.status}
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      setZoomModalItem(selectedItem);
+                      setZoomLevel(1);
+                      setRotationAngle(0);
+                    }}
+                    className="text-[10px] bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold flex items-center gap-1 transition cursor-pointer"
+                    title="Enlarge Slip View"
+                  >
+                    <Maximize2 size={10} /> View Ticket
+                  </button>
+
+                  <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
+                    selectedItem.status === "committed" 
+                      ? "bg-emerald-50 text-emerald-700" 
+                      : selectedItem.status === "success"
+                        ? "bg-amber-50 text-amber-700"
+                        : selectedItem.status === "failed"
+                          ? "bg-rose-50 text-rose-700"
+                          : selectedItem.status === "extracting"
+                            ? "bg-indigo-50 text-indigo-700 animate-pulse"
+                            : "bg-slate-100 text-slate-600"
+                  }`}>
+                    {selectedItem.status === "success" && selectedItem.isManualDraft ? "Draft" : selectedItem.status}
+                  </span>
+                </div>
               </div>
 
               {/* Status Specific Renderings */}
               {selectedItem.status === "pending" && (
-                <div className="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-3">
-                  <img
-                    src={selectedItem.preview}
-                    alt="Preview"
-                    className="max-h-24 rounded border border-slate-200 object-contain shadow-xs"
-                    referrerPolicy="no-referrer"
-                  />
+                <div className="flex-1 flex flex-col items-center justify-center text-center p-4 sm:p-6 space-y-3">
+                  <div className="relative group cursor-pointer" onClick={() => { setZoomModalItem(selectedItem); setZoomLevel(1); setRotationAngle(0); }}>
+                    <img
+                      src={selectedItem.preview}
+                      alt="Preview"
+                      className="max-h-28 rounded border border-slate-200 object-contain shadow-xs bg-white"
+                      referrerPolicy="no-referrer"
+                    />
+                    <div className="absolute inset-0 bg-slate-900/40 text-white rounded flex items-center justify-center opacity-0 group-hover:opacity-100 transition text-[10px] font-bold gap-1">
+                      <ZoomIn size={12} /> Inspect Slip
+                    </div>
+                  </div>
                   <div>
-                    <h3 className="text-xs font-bold text-slate-700">Drawing Ready for Scan</h3>
-                    <p className="text-[10px] text-slate-400 mt-1 max-w-[240px]">
-                      Extract this lotto result to verify numbers and instantly forecast the next game winning numbers.
+                    <h3 className="text-xs font-bold text-slate-700">Drawing Ready</h3>
+                    <p className="text-[10px] text-slate-400 mt-1 max-w-[260px]">
+                      Extract numbers automatically with AI, or click Transcribe to type them directly from the ticket.
                     </p>
                   </div>
-                  <button
-                    onClick={() => extractItem(selectedItem.id, (step) => setLoadingStep(step))}
-                    className="py-1.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-extrabold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer"
-                  >
-                    <Sparkles size={11} /> Extract Draw & Predict Next
-                  </button>
+                  <div className="flex items-center gap-2 flex-wrap justify-center">
+                    <button
+                      onClick={() => extractItem(selectedItem.id, (step) => setLoadingStep(step))}
+                      className="py-1.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-extrabold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer"
+                    >
+                      <Sparkles size={11} /> Scan with AI
+                    </button>
+                    <button
+                      onClick={() => handleMakeManual(selectedItem.id)}
+                      className="py-1.5 px-3 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-[11px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer"
+                    >
+                      <Edit3 size={11} /> Transcribe Manually
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -752,47 +969,88 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
               )}
 
               {selectedItem.status === "failed" && (
-                <div className="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-2">
-                  <AlertTriangle size={28} className="text-rose-500" />
-                  <div className="space-y-1">
-                    <p className="text-xs font-bold text-rose-900">AI Extraction Failed</p>
-                    <p className="text-[10px] text-rose-600 bg-rose-50 border border-rose-100 p-2 rounded-lg max-w-sm font-mono text-left truncate-3-lines">
-                      {selectedItem.error}
+                <div className="flex-1 flex flex-col items-center justify-center text-center p-4 sm:p-6 space-y-3">
+                  <div className="w-10 h-10 bg-rose-50 text-rose-500 rounded-full flex items-center justify-center">
+                    <AlertTriangle size={20} />
+                  </div>
+                  <div className="space-y-1 max-w-sm">
+                    <p className="text-xs font-bold text-rose-900">AI Extraction Not Available</p>
+                    <p className="text-[10px] text-rose-600 bg-rose-50 border border-rose-100 p-2 rounded-lg font-mono text-left leading-relaxed">
+                      {selectedItem.error || "The AI OCR endpoint could not parse this slip."}
                     </p>
                   </div>
-                  <button
-                    onClick={() => extractItem(selectedItem.id, (step) => setLoadingStep(step))}
-                    className="py-1.5 px-4 bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer mt-1"
-                  >
-                    <RotateCcw size={12} /> Retry Extraction
-                  </button>
+                  <div className="flex items-center gap-2 flex-wrap justify-center pt-1">
+                    <button
+                      onClick={() => handleMakeManual(selectedItem.id)}
+                      className="py-1.5 px-3.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-extrabold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer shadow-xs"
+                    >
+                      <Edit3 size={11} /> Transcribe Slip Manually
+                    </button>
+                    <button
+                      onClick={() => extractItem(selectedItem.id, (step) => setLoadingStep(step))}
+                      className="py-1.5 px-3 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-[11px] font-bold rounded-lg flex items-center justify-center gap-1 transition cursor-pointer"
+                    >
+                      <RotateCcw size={11} /> Retry AI Scan
+                    </button>
+                  </div>
                 </div>
               )}
 
               {/* Success or Committed Display (Editable Verification Fields + Instant Prediction Forecast) */}
               {(selectedItem.status === "success" || selectedItem.status === "committed") && selectedItem.extractedData && (
-                <div className="space-y-4 flex-1">
+                <div className="space-y-3.5 flex-1">
                   
+                  {/* Thumbnail Banner with Quick Zoom */}
+                  <div className="flex items-center justify-between p-2 bg-white rounded-lg border border-slate-200/80">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <img
+                        src={selectedItem.preview}
+                        alt="Slip Thumbnail"
+                        className="w-12 h-10 object-cover rounded border border-slate-200 cursor-pointer shrink-0"
+                        onClick={() => { setZoomModalItem(selectedItem); setZoomLevel(1); setRotationAngle(0); }}
+                        referrerPolicy="no-referrer"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-bold text-slate-600 truncate">Ticket Image Reference</p>
+                        <p className="text-[9px] text-indigo-600 font-medium cursor-pointer hover:underline flex items-center gap-0.5" onClick={() => { setZoomModalItem(selectedItem); setZoomLevel(1); setRotationAngle(0); }}>
+                          <ZoomIn size={10} /> Click to zoom and read slip numbers
+                        </p>
+                      </div>
+                    </div>
+                    {selectedItem.isManualDraft && (
+                      <span className="text-[9px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full uppercase">
+                        Manual Transcribe Mode
+                      </span>
+                    )}
+                  </div>
+
                   {/* Verification Fields */}
-                  <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div className="grid grid-cols-2 gap-2.5 text-xs">
                     <div>
                       <label className="block text-[10px] text-slate-400 font-bold uppercase">Game Name</label>
                       <input
                         type="text"
+                        list="common-games-list"
                         disabled={selectedItem.status === "committed"}
                         value={selectedItem.extractedData.gameName}
-                        onChange={(e) => handleFieldChange({ gameName: e.target.value })}
-                        className="w-full mt-1 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-800 font-semibold disabled:bg-slate-100 disabled:text-slate-500"
+                        onChange={(e) => handleFieldChange({ gameName: e.target.value.toUpperCase() })}
+                        className="w-full mt-1 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-800 font-semibold disabled:bg-slate-100 disabled:text-slate-500 uppercase"
                       />
+                      <datalist id="common-games-list">
+                        {COMMON_GAMES.map((g) => (
+                          <option key={g} value={g} />
+                        ))}
+                      </datalist>
                     </div>
                     <div>
-                      <label className="block text-[10px] text-slate-400 font-bold uppercase">Edition</label>
+                      <label className="block text-[10px] text-slate-400 font-bold uppercase">Edition #</label>
                       <input
                         type="text"
                         disabled={selectedItem.status === "committed"}
                         value={selectedItem.extractedData.edition}
                         onChange={(e) => handleFieldChange({ edition: e.target.value })}
                         className="w-full mt-1 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-800 font-semibold disabled:bg-slate-100 disabled:text-slate-500"
+                        placeholder="e.g. 412"
                       />
                     </div>
                     <div>
@@ -813,6 +1071,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                         value={selectedItem.extractedData.time}
                         onChange={(e) => handleFieldChange({ time: e.target.value })}
                         className="w-full mt-1 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-800 font-semibold disabled:bg-slate-100 disabled:text-slate-500"
+                        placeholder="e.g. 18:30"
                       />
                     </div>
                   </div>
@@ -821,63 +1080,68 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                   <div className="space-y-2 pt-2 border-t border-slate-200/60 text-xs">
                     
                     <div className="flex items-center gap-2">
-                      <span className="w-14 text-[10px] text-slate-400 font-bold uppercase">Winning:</span>
-                      <div className="flex gap-1">
+                      <span className="w-16 text-[10px] text-slate-500 font-bold uppercase">Winning (5):</span>
+                      <div className="flex gap-1.5 flex-wrap">
                         {selectedItem.extractedData.winningNumbers.map((n, i) => (
                           <input
                             key={i}
+                            ref={(el) => (winningInputRefs.current[i] = el)}
                             type="number"
+                            min="1"
+                            max="90"
                             disabled={selectedItem.status === "committed"}
-                            value={n || ""}
-                            onChange={(e) => {
-                              if (!selectedItem.extractedData) return;
-                              const copy = [...selectedItem.extractedData.winningNumbers];
-                              copy[i] = parseInt(e.target.value, 10) || 0;
-                              handleFieldChange({ winningNumbers: copy });
-                            }}
-                            className="w-8 h-8 rounded-full bg-slate-950 border border-slate-850 text-white font-mono text-xs font-bold text-center flex items-center justify-center disabled:opacity-85"
+                            value={n === 0 ? "" : n}
+                            placeholder="-"
+                            onChange={(e) => handleWinningNumberChange(i, e.target.value)}
+                            className="w-8 h-8 rounded-full bg-slate-900 border border-slate-800 text-white font-mono text-xs font-bold text-center flex items-center justify-center focus:ring-2 focus:ring-indigo-500 disabled:opacity-85"
                           />
                         ))}
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <span className="w-14 text-[10px] text-slate-400 font-bold uppercase">Extra:</span>
-                      <div className="flex gap-1">
+                      <span className="w-16 text-[10px] text-slate-500 font-bold uppercase">Extra (2):</span>
+                      <div className="flex gap-1.5 flex-wrap">
                         {selectedItem.extractedData.extraNumbers.map((n, i) => (
                           <input
                             key={i}
                             type="number"
+                            min="1"
+                            max="90"
                             disabled={selectedItem.status === "committed"}
-                            value={n || ""}
+                            value={n === 0 ? "" : n}
+                            placeholder="-"
                             onChange={(e) => {
                               if (!selectedItem.extractedData) return;
                               const copy = [...selectedItem.extractedData.extraNumbers];
                               copy[i] = parseInt(e.target.value, 10) || 0;
                               handleFieldChange({ extraNumbers: copy });
                             }}
-                            className="w-8 h-8 rounded-full bg-emerald-500 border border-emerald-600 text-white font-mono text-xs font-bold text-center flex items-center justify-center disabled:opacity-85"
+                            className="w-8 h-8 rounded-full bg-emerald-500 border border-emerald-600 text-white font-mono text-xs font-bold text-center flex items-center justify-center focus:ring-2 focus:ring-emerald-400 disabled:opacity-85"
                           />
                         ))}
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <span className="w-14 text-[10px] text-slate-400 font-bold uppercase">Machine:</span>
-                      <div className="flex gap-1">
+                      <span className="w-16 text-[10px] text-slate-500 font-bold uppercase">Machine (5):</span>
+                      <div className="flex gap-1.5 flex-wrap">
                         {selectedItem.extractedData.machineNumbers.map((n, i) => (
                           <input
                             key={i}
                             type="number"
+                            min="1"
+                            max="90"
                             disabled={selectedItem.status === "committed"}
-                            value={n || ""}
+                            value={n === 0 ? "" : n}
+                            placeholder="-"
                             onChange={(e) => {
                               if (!selectedItem.extractedData) return;
                               const copy = [...selectedItem.extractedData.machineNumbers];
                               copy[i] = parseInt(e.target.value, 10) || 0;
                               handleFieldChange({ machineNumbers: copy });
                             }}
-                            className="w-8 h-8 rounded-full bg-slate-200 border border-slate-300 text-slate-700 font-mono text-xs font-bold text-center flex items-center justify-center disabled:opacity-85"
+                            className="w-8 h-8 rounded-full bg-slate-200 border border-slate-300 text-slate-700 font-mono text-xs font-bold text-center flex items-center justify-center focus:ring-2 focus:ring-slate-400 disabled:opacity-85"
                           />
                         ))}
                       </div>
@@ -886,11 +1150,11 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
 
                   {/* 🎯 Instant Next Game Predicted Winning Numbers Card */}
                   {instantPrediction && (
-                    <div className="p-3.5 bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-indigo-50 border border-amber-300/70 rounded-xl space-y-2.5 shadow-xs">
+                    <div className="p-3 bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-indigo-50 border border-amber-300/70 rounded-xl space-y-2 shadow-2xs">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-1.5">
                           <span className="p-1 bg-amber-500 text-white rounded-md shrink-0 shadow-xs">
-                            <Sparkles size={13} />
+                            <Sparkles size={12} />
                           </span>
                           <div>
                             <span className="text-[11px] font-black uppercase text-amber-900 tracking-tight block">
@@ -908,11 +1172,11 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
 
                       {/* 5 Forecast Winning Numbers */}
                       <div className="flex items-center gap-2 flex-wrap pt-0.5">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1">
                           {instantPrediction.predictedWinningNumbers.map((num) => (
                             <span
                               key={`inst-win-${num}`}
-                              className="w-8 h-8 rounded-full bg-gradient-to-br from-amber-400 to-amber-500 text-slate-950 font-black text-xs flex items-center justify-center shadow-xs border border-amber-300 ring-1 ring-amber-400/40"
+                              className="w-7 h-7 rounded-full bg-gradient-to-br from-amber-400 to-amber-500 text-slate-950 font-black text-xs flex items-center justify-center shadow-xs border border-amber-300"
                             >
                               {num}
                             </span>
@@ -925,7 +1189,7 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                             {instantPrediction.predictedExtraNumbers.map((num) => (
                               <span
                                 key={`inst-ext-${num}`}
-                                className="w-6 h-6 rounded-full bg-emerald-500 text-white font-bold text-[10px] flex items-center justify-center shadow-xs"
+                                className="w-5 h-5 rounded-full bg-emerald-500 text-white font-bold text-[9px] flex items-center justify-center shadow-xs"
                               >
                                 {num}
                               </span>
@@ -933,10 +1197,6 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
                           </div>
                         )}
                       </div>
-
-                      <p className="text-[9px] text-slate-600 leading-snug line-clamp-2">
-                        {instantPrediction.reasoning}
-                      </p>
                     </div>
                   )}
 
@@ -1006,6 +1266,93 @@ export default function LottoExtractor({ results, onExtractionComplete }: LottoE
         </div>
 
       </div>
+
+      {/* 🔍 High-Resolution Slip Image Zoom Modal */}
+      {zoomModalItem && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+            
+            {/* Modal Header */}
+            <div className="p-3 sm:p-4 border-b border-slate-800 flex items-center justify-between text-white">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileImage size={18} className="text-indigo-400 shrink-0" />
+                <span className="text-xs sm:text-sm font-bold truncate">{zoomModalItem.file.name}</span>
+                <span className="text-[10px] text-slate-400 hidden sm:inline">
+                  ({(zoomModalItem.file.size / 1024).toFixed(1)} KB)
+                </span>
+              </div>
+
+              {/* Controls */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setZoomLevel((z) => Math.max(z - 0.25, 0.75))}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition"
+                  title="Zoom Out"
+                >
+                  <ZoomOut size={14} />
+                </button>
+                <span className="text-[10px] font-mono text-slate-300 w-10 text-center">
+                  {Math.round(zoomLevel * 100)}%
+                </span>
+                <button
+                  onClick={() => setZoomLevel((z) => Math.min(z + 0.25, 2.5))}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition"
+                  title="Zoom In"
+                >
+                  <ZoomIn size={14} />
+                </button>
+                <button
+                  onClick={() => setRotationAngle((r) => (r + 90) % 360)}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition"
+                  title="Rotate 90°"
+                >
+                  <RotateCw size={14} />
+                </button>
+                <button
+                  onClick={() => setZoomModalItem(null)}
+                  className="p-1.5 bg-rose-500/20 hover:bg-rose-500/40 text-rose-300 rounded-lg transition ml-2"
+                  title="Close Preview"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Image Viewport */}
+            <div className="flex-1 overflow-auto p-4 flex items-center justify-center min-h-[300px] bg-slate-950/50">
+              <div
+                style={{
+                  transform: `scale(${zoomLevel}) rotate(${rotationAngle}deg)`,
+                  transition: "transform 0.2s ease-out",
+                }}
+                className="origin-center"
+              >
+                <img
+                  src={zoomModalItem.preview}
+                  alt="Full Ticket View"
+                  className="max-h-[65vh] max-w-full rounded shadow-lg object-contain"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 bg-slate-950 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+              <span>Use zoom and rotate controls to clearly inspect winning numbers.</span>
+              <button
+                onClick={() => {
+                  handleMakeManual(zoomModalItem.id);
+                  setZoomModalItem(null);
+                }}
+                className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold flex items-center gap-1 transition"
+              >
+                <Edit3 size={12} /> Transcribe Numbers Now
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
 
     </div>
   );

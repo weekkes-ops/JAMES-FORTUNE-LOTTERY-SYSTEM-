@@ -201,9 +201,11 @@ async function startServer() {
       return res.json({ success: true, data: extractedData });
     } catch (error: any) {
       const sanitizedMessage = cleanErrorMessage(error);
+      const isKeyMissing = !process.env.GEMINI_API_KEY || sanitizedMessage.toLowerCase().includes("gemini_api_key") || sanitizedMessage.toLowerCase().includes("missing");
       console.warn("Gemini OCR warning (handled gracefully):", sanitizedMessage);
       return res.status(200).json({
         success: false,
+        keyMissing: isKeyMissing,
         error: sanitizedMessage,
       });
     }
